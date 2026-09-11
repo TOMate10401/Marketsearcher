@@ -126,7 +126,7 @@ def main():
 
     for item in items:
         st.subheader(item["title"])
-        st.write(f"Zustand: {item["condition"]}")
+        st.write(f"Zustand: {item['condition']}")
         st.write(f"Preis: {item['price']}")
         st.write(f"Link: {item['link']}")
         st.image(item["image_url"])
