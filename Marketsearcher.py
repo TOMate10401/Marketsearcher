@@ -1,135 +1,424 @@
+import json
+import re
+
 import requests
 from bs4 import BeautifulSoup
 import streamlit as st
 
 
-def vinted_scrape(search_term):
-    url = "https://www.vinted.de/catalog?search_text="
+CATEGORIES = [
+    "Alle Kategorien",
+    "Mode & Kleidung",
+    "Elektronik",
+    "Haus & Garten",
+    "Sport & Outdoor",
+    "Buecher, Filme & Musik",
+    "Hobbys & Sammeln",
+    "Auto, Rad & Boot",
+    "Familie, Kind & Baby",
+    "Beauty & Gesundheit",
+    "Haustiere",
+    "Immobilien",
+]
 
-    
-    size = {"XS" : "206", "S" : "207", "M" : "208", "L" : "209", "XL" : "210", "XXL" : "211"}
-    gender = {"male" : "5", "female" : "1904"}
-    condition = {"neu" : "6", "wie neu" : "1", "sehr gut" : "2", "gut" : "3", "gebraucht" : "4"}
-    color = {}
+CATEGORY_MAP = {
+    "Mode & Kleidung": {
+        "vinted": "1904",
+        "ebay": "11450",
+        "kleinanzeigen": "c169",
+    },
+    "Elektronik": {
+        "vinted": "2994",
+        "ebay": "58058",
+        "kleinanzeigen": "c93",
+    },
+    "Haus & Garten": {
+        "vinted": "1918",
+        "ebay": "11700",
+        "kleinanzeigen": "c76",
+    },
+    "Sport & Outdoor": {
+        "vinted": "4332",
+        "ebay": "888",
+        "kleinanzeigen": "c178",
+    },
+    "Buecher, Filme & Musik": {
+        "vinted": "2309",
+        "ebay": "267",
+        "kleinanzeigen": "c77",
+    },
+    "Hobbys & Sammeln": {
+        "vinted": "4824",
+        "ebay": "1",
+        "kleinanzeigen": "c86",
+    },
+    "Auto, Rad & Boot": {
+        "vinted": None,
+        "ebay": "131090",
+        "kleinanzeigen": "c21",
+    },
+    "Familie, Kind & Baby": {
+        "vinted": "1193",
+        "ebay": "171146",
+        "kleinanzeigen": "c78",
+    },
+    "Beauty & Gesundheit": {
+        "vinted": None,
+        "ebay": "26395",
+        "kleinanzeigen": "c59",
+    },
+    "Haustiere": {
+        "vinted": None,
+        "ebay": None,
+        "kleinanzeigen": "c80",
+    },
+    "Immobilien": {
+        "vinted": None,
+        "ebay": None,
+        "kleinanzeigen": "c33",
+    },
+}
+
+VINTED_GENDER = {
+    "male": "5",
+    "female": "1904",
+}
+
+VINTED_SIZE = {
+    "XS": "206",
+    "S": "207",
+    "M": "208",
+    "L": "209",
+    "XL": "210",
+    "XXL": "211",
+}
+
+VINTED_CONDITION = {
+    "neu": "6",
+    "wie neu": "1",
+    "sehr gut": "2",
+    "gut": "3",
+    "gebraucht": "4",
+}
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+}
+
+
+def _price_to_float(price_str):
+    if not price_str:
+        return None
+    cleaned = re.sub(r"[^\d,\.]", "", price_str)
+    cleaned = cleaned.replace(".", "").replace(",", ".")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _get(url):
+    return requests.get(url, headers=HEADERS, timeout=20)
+
+
+def vinted_scrape(search_term):
+    category = search_term.get("category", "Alle Kategorien")
+    vinted_cat = CATEGORY_MAP.get(category, {}).get("vinted")
+
+    if category != "Alle Kategorien" and not vinted_cat:
+        return []
 
     term = search_term["term"].strip().replace(" ", "+")
-    url = url + term
+    url = "https://www.vinted.de/catalog?search_text=" + term
 
-    if search_term["gender"] != "":
-        url += "&catalog[]=" + gender[search_term["gender"]]
+    if category != "Alle Kategorien" and vinted_cat:
+        url += "&catalog[]=" + vinted_cat
 
-    if search_term["size"] != "":
+    if search_term.get("gender") and search_term["gender"] != "":
+        url += "&catalog[]=" + VINTED_GENDER[search_term["gender"]]
+
+    if search_term.get("size"):
         for x in search_term["size"]:
-            url += "&size_ids[]=" + size[x]
+            url += "&size_ids[]=" + VINTED_SIZE[x]
 
-    if search_term["condition"] != "":
+    if search_term.get("condition"):
         for x in search_term["condition"]:
-            url += "&status_ids[]=" + condition[x]
+            url += "&status_ids[]=" + VINTED_CONDITION[x]
 
-    if search_term["min_price"] != "":
-        url += "&price_from=" + search_term["min_price"]
+    if search_term.get("min_price") not in ("", None):
+        url += "&price_from=" + str(search_term["min_price"])
 
-    if search_term["max_price"] != "":
-        url += "&price_to=" + search_term["max_price"]
+    if search_term.get("max_price") not in ("", None):
+        url += "&price_to=" + str(search_term["max_price"])
 
-    #&price_from=5&currency=EUR&price_to=50
+    try:
+        page = _get(url)
+    except requests.RequestException:
+        return []
 
+    if page.status_code != 200:
+        st.session_state["vinted_blocked"] = True
+        return []
 
-
-    
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
-
-    page = requests.get(url, headers=headers)
-    
-    soup = BeautifulSoup(page.text, features="lxml")
-
-    items = soup.find_all('div', class_="feed-grid__item")
-
+    soup = BeautifulSoup(page.content, features="lxml")
+    items = soup.find_all("div", class_="feed-grid__item")
 
     vinted_items = []
-
     for item in items:
-        item_dict = {}
+        id_div = item.find(
+            "div", {"data-testid": lambda x: x and x.startswith("product-item-id-")}
+        )
+        if not id_div:
+            continue
+        product_id = id_div["data-testid"].split("-")[-1]
 
-        product_id = item.find("div", {"data-testid": lambda x: x and x.startswith("product-item-id-")})["data-testid"].split("-")[-1]
+        def _text(testid):
+            el = item.find("p", {"data-testid": testid})
+            return el.text.strip() if el else ""
 
-        # Produkt-ID
-        item_dict["product_id"] = product_id
+        def _attr(tag, testid, attr):
+            el = item.find(tag, {"data-testid": testid})
+            return el[attr] if el and el.has_attr(attr) else ""
 
-        # Titel
-        item_dict["title"] = item.find("p", {"data-testid": f"product-item-id-{product_id}--description-title"}).text.strip()
-
-        # Preis
-        item_dict["price"] = item.find("p", {"data-testid": f"product-item-id-{product_id}--price-text"}).text.strip()
-
-        # Zustand
-        item_dict["condition"] = item.find("p", {"data-testid": f"product-item-id-{product_id}--description-subtitle"}).text.strip()
-
-        # Link
-        item_dict["link"] = item.find("a", {"data-testid": f"product-item-id-{product_id}--overlay-link"})["href"]
-
-        # Bild-URL
-        item_dict["image_url"] = item.find("img", {"data-testid": f"product-item-id-{product_id}--image--img"})["src"]
-
-
+        item_dict = {
+            "source": "Vinted",
+            "product_id": product_id,
+            "title": _text(f"product-item-id-{product_id}--description-title"),
+            "price": _text(f"product-item-id-{product_id}--price-text"),
+            "condition": _text(
+                f"product-item-id-{product_id}--description-subtitle"
+            ),
+            "link": _attr(
+                "a", f"product-item-id-{product_id}--overlay-link", "href"
+            ),
+            "image_url": _attr(
+                "img", f"product-item-id-{product_id}--image--img", "src"
+            ),
+        }
+        item_dict["price_value"] = _price_to_float(item_dict["price"])
         vinted_items.append(item_dict)
-    
+
     return vinted_items
 
 
-def ebay_scrape(term):
-    url = "https://www.ebay.de/sch/i.html?_nkw=" #&LH_SellerType=1
+def ebay_scrape(search_term):
+    category = search_term.get("category", "Alle Kategorien")
+    ebay_cat = CATEGORY_MAP.get(category, {}).get("ebay")
 
-    term = term.strip().replace(" ", "+")
+    if category != "Alle Kategorien" and not ebay_cat:
+        return []
 
-    url = url + term
+    term = search_term["term"].strip().replace(" ", "+")
+    url = "https://www.ebay.de/sch/i.html?_nkw=" + term
+    if category != "Alle Kategorien" and ebay_cat:
+        url += "&_sacat=" + ebay_cat
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
+    try:
+        page = _get(url)
+    except requests.RequestException:
+        return []
 
-    page = requests.get(url, headers=headers)
-    print(page.status_code)
-    soup = BeautifulSoup (page.text, features="lxml")
+    if page.status_code != 200 or page.content.count(b"s-item") == 0:
+        st.session_state["ebay_blocked"] = True
+        return []
+
+    soup = BeautifulSoup(page.content, features="lxml")
+    items = soup.select("li.s-item, div.s-item")
+
+    ebay_items = []
+    for item in items:
+        title_el = item.select_one(".s-item__title")
+        price_el = item.select_one(".s-item__price")
+        link_el = item.select_one(".s-item__link")
+        img_el = item.select_one(".s-item__image-img, img")
+
+        if not title_el or "Shop on eBay" in title_el.text:
+            continue
+
+        ebay_items.append(
+            {
+                "source": "eBay",
+                "title": title_el.text.strip(),
+                "price": price_el.text.strip() if price_el else "",
+                "price_value": _price_to_float(
+                    price_el.text if price_el else ""
+                ),
+                "link": link_el["href"] if link_el else "",
+                "image_url": img_el.get("src", "") if img_el else "",
+                "condition": "",
+            }
+        )
+
+    return ebay_items
 
 
-def kleinanzeigen_scraper(term):
+def kleinanzeigen_scraper(search_term):
+    category = search_term.get("category", "Alle Kategorien")
+    ka_cat = CATEGORY_MAP.get(category, {}).get("kleinanzeigen")
+
+    if category != "Alle Kategorien" and not ka_cat:
+        return []
+
+    term = search_term["term"].strip().replace(" ", "-") or "alles"
+    if category != "Alle Kategorien" and ka_cat:
+        url = f"https://www.kleinanzeigen.de/s-{term}/{ka_cat}"
+    else:
+        url = f"https://www.kleinanzeigen.de/s-{term}/k0"
+
+    try:
+        page = _get(url)
+    except requests.RequestException:
+        return []
+
+    soup = BeautifulSoup(page.content, features="lxml")
+    articles = soup.find_all("article", attrs={"data-adid": True})
+
+    items = []
+    for art in articles:
+        href = art.get("data-href", "")
+        if href and not href.startswith("http"):
+            href = "https://www.kleinanzeigen.de" + href
+
+        title = ""
+        script = art.find("script", type="application/ld+json")
+        if script:
+            try:
+                title = json.loads(script.get_text()).get("title", "")
+            except (ValueError, TypeError):
+                title = ""
+        if not title:
+            h = art.find("h3") or art.find("h2")
+            if h:
+                title = h.get_text(strip=True)
+
+        img = art.find("img")
+        img_src = img.get("src", "") if img else ""
+
+        price = ""
+        for el in art.find_all(string=re.compile(r"€|VB|Zu verschenken")):
+            price = " ".join(el.split())
+            break
+
+        items.append(
+            {
+                "source": "Kleinanzeigen",
+                "title": title,
+                "price": price,
+                "price_value": _price_to_float(price),
+                "link": href,
+                "image_url": img_src,
+                "condition": "",
+            }
+        )
+
+    return items
 
 
-    return
+def sort_items(items, key):
+    if not items:
+        return items
+    if key == "Preis aufsteigend":
+        return sorted(
+            items, key=lambda d: d.get("price_value") or float("inf")
+        )
+    if key == "Preis absteigend":
+        return sorted(
+            items,
+            key=lambda d: d.get("price_value") or float("inf"),
+            reverse=True,
+        )
+    if key == "Titel":
+        return sorted(items, key=lambda d: d.get("title", "").lower())
+    return items
 
 
 def main():
+    st.title("Marketsearcher")
+
     search_term = {}
-
-    st.title("Marketplace")
-
+    search_term["category"] = st.selectbox("Kategorie", CATEGORIES)
     search_term["term"] = st.text_input("Suchbegriff", "")
-    search_term["gender"] = st.selectbox("Gender: ", ("", "male", "female"))
-    #search_term["brand"] = st.text_input("Marke", "")
-    search_term["size"] = st.multiselect("Größe: ", ("XS", "S", "M", "L", "XL", "XXL"))
-    search_term["condition"] = st.multiselect("Zustand: ", ("neu", "wie neu", "sehr gut", "gut", "gebraucht"))
-    search_term["min_price"] = st.text_input("Mindestpreis", "")
-    search_term["max_price"] = st.text_input("Maximalpreis", "")
 
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        use_vinted = st.checkbox("Vinted", value=True)
+    with col2:
+        use_ebay = st.checkbox("eBay", value=True)
+    with col3:
+        use_kleinanzeigen = st.checkbox("Kleinanzeigen", value=True)
 
+    is_fashion = search_term["category"] in ("Alle Kategorien", "Mode & Kleidung")
 
-    
-    items = vinted_scrape(search_term)
+    if is_fashion:
+        search_term["gender"] = st.selectbox(
+            "Gender", ("", "male", "female")
+        )
+        search_term["size"] = st.multiselect(
+            "Größe", ("XS", "S", "M", "L", "XL", "XXL")
+        )
+        search_term["condition"] = st.multiselect(
+            "Zustand", ("neu", "wie neu", "sehr gut", "gut", "gebraucht")
+        )
+    else:
+        search_term["gender"] = ""
+        search_term["size"] = []
+        search_term["condition"] = []
 
-    #option = st.selectbox("sortieren nach: ", ("Preis auf", "Preis ab", "Titel"))
-    #if option == "Preis auf":
-    #    items = items = sorted(items, key=lambda d: d["price"])
+    sc1, sc2 = st.columns(2)
+    search_term["min_price"] = sc1.text_input("Mindestpreis (EUR)", "")
+    search_term["max_price"] = sc2.text_input("Maximalpreis (EUR)", "")
 
+    sort_option = st.selectbox(
+        "Sortieren nach", ("Keine Sortierung", "Preis aufsteigend",
+                           "Preis absteigend", "Titel")
+    )
+
+    if not search_term["term"].strip():
+        st.info("Suchbegriff eingeben, um Ergebnisse zu sehen.")
+        return
+
+    st.session_state["ebay_blocked"] = False
+    st.session_state["vinted_blocked"] = False
+
+    items = []
+    if use_vinted:
+        items += vinted_scrape(search_term)
+    if use_ebay:
+        items += ebay_scrape(search_term)
+    if use_kleinanzeigen:
+        items += kleinanzeigen_scraper(search_term)
+
+    if st.session_state.get("vinted_blocked"):
+        st.warning(
+            "Vinted blockiert automatische Abfragen (Bot-Schutz). "
+            "Vinted-Ergebnisse konnten nicht geladen werden."
+        )
+
+    if st.session_state.get("ebay_blocked"):
+        st.warning(
+            "eBay blockiert automatische Abfragen (Bot-Schutz). "
+            "eBay-Ergebnisse konnten nicht geladen werden."
+        )
+
+    items = sort_items(items, sort_option)
+
+    st.caption(f"{len(items)} Ergebnisse")
     for item in items:
         st.subheader(item["title"])
-        st.write(f"Zustand: {item['condition']}")
-        st.write(f"Preis: {item['price']}")
-        st.write(f"Link: {item['link']}")
-        st.image(item["image_url"])
+        st.caption(item["source"])
+        if item["condition"]:
+            st.write(f"Zustand: {item['condition']}")
+        if item["price"]:
+            st.write(f"Preis: {item['price']}")
+        if item["link"]:
+            st.write(f"Link: {item['link']}")
+        if item["image_url"]:
+            st.image(item["image_url"])
         st.divider()
 
 
