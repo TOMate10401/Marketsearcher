@@ -1,5 +1,7 @@
 import json
+import os
 import re
+import base64
 
 import requests
 from bs4 import BeautifulSoup
@@ -109,6 +111,53 @@ HEADERS = {
     ),
     "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
 }
+
+SANDBOX_TOKEN_URL = "https://api.sandbox.ebay.com/identity/v1/oauth2/token"
+PRODUCTION_TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token"
+DEFAULT_SCOPE = "https://api.ebay.com/oauth/api_scope"
+
+
+def _load_env(path=".env"):
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ[key.strip()] = value.strip()
+
+
+def _b64_credentials(client_id, client_secret):
+    raw = f"{client_id}:{client_secret}".encode("utf-8")
+    return base64.b64encode(raw).decode("utf-8")
+
+
+def get_ebay_token():
+    """Holt ein eBay Application Access Token aus der Umgebung oder .env."""
+    _load_env()
+    client_id = os.environ.get("EBAY_CLIENT_ID")
+    client_secret = os.environ.get("EBAY_CLIENT_SECRET")
+    env = os.environ.get("EBAY_ENV", "sandbox")
+
+    if not client_id or not client_secret:
+        return None
+
+    token_url = SANDBOX_TOKEN_URL if env == "sandbox" else PRODUCTION_TOKEN_URL
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Authorization": f"Basic {_b64_credentials(client_id, client_secret)}",
+    }
+    data = {"grant_type": "client_credentials", "scope": DEFAULT_SCOPE}
+
+    try:
+        resp = requests.post(token_url, headers=headers, data=data, timeout=20)
+        if resp.status_code == 200:
+            return resp.json().get("access_token")
+    except requests.RequestException:
+        pass
+    return None
 
 
 def _price_to_float(price_str):
@@ -257,6 +306,68 @@ def ebay_scrape(search_term):
     return ebay_items
 
 
+def ebay_api_search(search_term, token=None):
+    """Suche über die eBay Browse API (Sandbox/Production)."""
+    env = os.environ.get("EBAY_ENV", "sandbox")
+    base_url = "https://api.sandbox.ebay.com" if env == "sandbox" else "https://api.ebay.com"
+
+    # Token holen, falls nicht mitgegeben
+    if not token:
+        token = get_ebay_token()
+        if not token:
+            st.error("eBay Token konnte nicht generiert werden. Prüfe .env-Datei.")
+            return []
+
+    term = search_term["term"].strip()
+    category = search_term.get("category", "Alle Kategorien")
+    ebay_cat = CATEGORY_MAP.get(category, {}).get("ebay")
+
+    if category != "Alle Kategorien" and not ebay_cat:
+        return []
+
+    # API-Request
+    url = f"{base_url}/buy/browse/v1/item_summary/search"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-EBAY-C-MARKETPLACE-ID": "EBAY_DE",
+    }
+    params = {"q": term, "limit": 50}
+    if ebay_cat:
+        params["filter"] = f"categories:{{{ebay_cat}}}"
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=20)
+        if resp.status_code != 200:
+            st.warning(f"eBay API Fehler: {resp.status_code} - {resp.text}")
+            return []
+        data = resp.json()
+    except requests.RequestException as e:
+        st.error(f"eBay API Request fehlgeschlagen: {e}")
+        return []
+
+    # Ergebnisse parsen
+    ebay_items = []
+    for item in data.get("itemSummares", []):
+        price_value = None
+        price_str = ""
+        if "price" in item and "value" in item["price"]:
+            price_value = _price_to_float(item["price"]["value"])
+            price_str = f"{item['price']['value']} {item['price'].get('currency', 'EUR')}"
+
+        ebay_items.append(
+            {
+                "source": "eBay",
+                "title": item.get("title", ""),
+                "price": price_str,
+                "price_value": price_value,
+                "link": item.get("itemAffiliateWebUrl", ""),
+                "image_url": item.get("image", {}).get("imageUrl", ""),
+                "condition": item.get("condition", ""),
+            }
+        )
+    return ebay_items
+
+
 def kleinanzeigen_scraper(search_term):
     category = search_term.get("category", "Alle Kategorien")
     ka_cat = CATEGORY_MAP.get(category, {}).get("kleinanzeigen")
@@ -340,6 +451,18 @@ def sort_items(items, key):
 def main():
     st.title("Marketsearcher")
 
+    # UI für Sandbox/Production-Modus
+    col_env = st.columns(2)
+    with col_env[0]:
+        use_sandbox = st.checkbox("Sandbox-Modus (Testdaten)", value=True)
+    with col_env[1]:
+        if use_sandbox:
+            os.environ["EBAY_ENV"] = "sandbox"
+            st.caption("🔹 Verwende eBay Sandbox (Testdaten)")
+        else:
+            os.environ["EBAY_ENV"] = "production"
+            st.caption("🔹 Verwende eBay Production (echte Daten)")
+
     search_term = {}
     search_term["category"] = st.selectbox("Kategorie", CATEGORIES)
     search_term["term"] = st.text_input("Suchbegriff", "")
@@ -349,6 +472,8 @@ def main():
         use_vinted = st.checkbox("Vinted", value=True)
     with col2:
         use_ebay = st.checkbox("eBay", value=True)
+        if use_ebay:
+            use_api = st.checkbox("eBay API verwenden (empfohlen)", value=True)
     with col3:
         use_kleinanzeigen = st.checkbox("Kleinanzeigen", value=True)
 
@@ -389,7 +514,15 @@ def main():
     if use_vinted:
         items += vinted_scrape(search_term)
     if use_ebay:
-        items += ebay_scrape(search_term)
+        if use_api:
+            # Token-Caching für die Session
+            if "ebay_token" not in st.session_state:
+                st.session_state.ebay_token = None
+            if not st.session_state.ebay_token:
+                st.session_state.ebay_token = get_ebay_token()
+            items += ebay_api_search(search_term, token=st.session_state.ebay_token)
+        else:
+            items += ebay_scrape(search_term)
     if use_kleinanzeigen:
         items += kleinanzeigen_scraper(search_term)
 
