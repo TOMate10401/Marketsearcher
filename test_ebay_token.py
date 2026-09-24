@@ -1,4 +1,4 @@
-"""Isolated test for the eBay OAuth client-credentials grant against the sandbox.
+"""Isolated test for the eBay OAuth client-credentials grant against production.
 
 Loads credentials from a local .env file (never committed), mints an
 Application Access Token, and prints the result. Run with:
@@ -12,7 +12,6 @@ import os
 import requests
 
 
-SANDBOX_TOKEN_URL = "https://api.sandbox.ebay.com/identity/v1/oauth2/token"
 PRODUCTION_TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 
 DEFAULT_SCOPE = "https://api.ebay.com/oauth/api_scope"
@@ -39,11 +38,9 @@ def get_application_token(
     client_id,
     client_secret,
     scope=DEFAULT_SCOPE,
-    env="sandbox",
+    env="production",
 ):
-    token_url = (
-        SANDBOX_TOKEN_URL if env == "sandbox" else PRODUCTION_TOKEN_URL
-    )
+    token_url = PRODUCTION_TOKEN_URL
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "Authorization": f"Basic {_b64_credentials(client_id, client_secret)}",
@@ -57,7 +54,7 @@ def main():
     _load_env()
     client_id = os.environ.get("EBAY_CLIENT_ID")
     client_secret = os.environ.get("EBAY_CLIENT_SECRET")
-    env = os.environ.get("EBAY_ENV", "sandbox")
+    env = os.environ.get("EBAY_ENV", "production")
     scope = os.environ.get("EBAY_SCOPE", DEFAULT_SCOPE)
     marketplace = os.environ.get("EBAY_MARKETPLACE_ID", "EBAY_DE")
 
@@ -75,7 +72,7 @@ def main():
     print(f"Marketplace:   {marketplace}")
     print(f"Scope:         {scope}")
     print(f"Client ID:     {client_id[:14]}...{client_id[-4:]}")
-    print(f"Token endpoint: {SANDBOX_TOKEN_URL if env == 'sandbox' else PRODUCTION_TOKEN_URL}")
+    print(f"Token endpoint: {PRODUCTION_TOKEN_URL}")
     print("-" * 60)
 
     resp = get_application_token(client_id, client_secret, scope, env)

@@ -112,7 +112,6 @@ HEADERS = {
     "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
 }
 
-SANDBOX_TOKEN_URL = "https://api.sandbox.ebay.com/identity/v1/oauth2/token"
 PRODUCTION_TOKEN_URL = "https://api.ebay.com/identity/v1/oauth2/token"
 DEFAULT_SCOPE = "https://api.ebay.com/oauth/api_scope"
 
@@ -139,12 +138,11 @@ def get_ebay_token():
     _load_env()
     client_id = os.environ.get("EBAY_CLIENT_ID")
     client_secret = os.environ.get("EBAY_CLIENT_SECRET")
-    env = os.environ.get("EBAY_ENV", "sandbox")
 
     if not client_id or not client_secret:
         return None
 
-    token_url = SANDBOX_TOKEN_URL if env == "sandbox" else PRODUCTION_TOKEN_URL
+    token_url = PRODUCTION_TOKEN_URL
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "Authorization": f"Basic {_b64_credentials(client_id, client_secret)}",
@@ -255,61 +253,9 @@ def vinted_scrape(search_term):
     return vinted_items
 
 
-def ebay_scrape(search_term):
-    category = search_term.get("category", "Alle Kategorien")
-    ebay_cat = CATEGORY_MAP.get(category, {}).get("ebay")
-
-    if category != "Alle Kategorien" and not ebay_cat:
-        return []
-
-    term = search_term["term"].strip().replace(" ", "+")
-    url = "https://www.ebay.de/sch/i.html?_nkw=" + term
-    if category != "Alle Kategorien" and ebay_cat:
-        url += "&_sacat=" + ebay_cat
-
-    try:
-        page = _get(url)
-    except requests.RequestException:
-        return []
-
-    if page.status_code != 200 or page.content.count(b"s-item") == 0:
-        st.session_state["ebay_blocked"] = True
-        return []
-
-    soup = BeautifulSoup(page.content, features="lxml")
-    items = soup.select("li.s-item, div.s-item")
-
-    ebay_items = []
-    for item in items:
-        title_el = item.select_one(".s-item__title")
-        price_el = item.select_one(".s-item__price")
-        link_el = item.select_one(".s-item__link")
-        img_el = item.select_one(".s-item__image-img, img")
-
-        if not title_el or "Shop on eBay" in title_el.text:
-            continue
-
-        ebay_items.append(
-            {
-                "source": "eBay",
-                "title": title_el.text.strip(),
-                "price": price_el.text.strip() if price_el else "",
-                "price_value": _price_to_float(
-                    price_el.text if price_el else ""
-                ),
-                "link": link_el["href"] if link_el else "",
-                "image_url": img_el.get("src", "") if img_el else "",
-                "condition": "",
-            }
-        )
-
-    return ebay_items
-
-
 def ebay_api_search(search_term, token=None):
-    """Suche über die eBay Browse API (Sandbox/Production)."""
-    env = os.environ.get("EBAY_ENV", "sandbox")
-    base_url = "https://api.sandbox.ebay.com" if env == "sandbox" else "https://api.ebay.com"
+    """Suche über die eBay Browse API (Production)."""
+    base_url = "https://api.ebay.com"
 
     # Token holen, falls nicht mitgegeben
     if not token:
@@ -347,7 +293,7 @@ def ebay_api_search(search_term, token=None):
 
     # Ergebnisse parsen
     ebay_items = []
-    for item in data.get("itemSummares", []):
+    for item in data.get("itemSummaries", []):
         price_value = None
         price_str = ""
         if "price" in item and "value" in item["price"]:
@@ -451,17 +397,8 @@ def sort_items(items, key):
 def main():
     st.title("Marketsearcher")
 
-    # UI für Sandbox/Production-Modus
-    col_env = st.columns(2)
-    with col_env[0]:
-        use_sandbox = st.checkbox("Sandbox-Modus (Testdaten)", value=True)
-    with col_env[1]:
-        if use_sandbox:
-            os.environ["EBAY_ENV"] = "sandbox"
-            st.caption("🔹 Verwende eBay Sandbox (Testdaten)")
-        else:
-            os.environ["EBAY_ENV"] = "production"
-            st.caption("🔹 Verwende eBay Production (echte Daten)")
+    os.environ["EBAY_ENV"] = "production"
+    st.caption("🔹 Verwende eBay Production (echte Daten)")
 
     search_term = {}
     search_term["category"] = st.selectbox("Kategorie", CATEGORIES)
@@ -472,8 +409,6 @@ def main():
         use_vinted = st.checkbox("Vinted", value=True)
     with col2:
         use_ebay = st.checkbox("eBay", value=True)
-        if use_ebay:
-            use_api = st.checkbox("eBay API verwenden (empfohlen)", value=True)
     with col3:
         use_kleinanzeigen = st.checkbox("Kleinanzeigen", value=True)
 
@@ -507,22 +442,18 @@ def main():
         st.info("Suchbegriff eingeben, um Ergebnisse zu sehen.")
         return
 
-    st.session_state["ebay_blocked"] = False
     st.session_state["vinted_blocked"] = False
 
     items = []
     if use_vinted:
         items += vinted_scrape(search_term)
     if use_ebay:
-        if use_api:
-            # Token-Caching für die Session
-            if "ebay_token" not in st.session_state:
-                st.session_state.ebay_token = None
-            if not st.session_state.ebay_token:
-                st.session_state.ebay_token = get_ebay_token()
-            items += ebay_api_search(search_term, token=st.session_state.ebay_token)
-        else:
-            items += ebay_scrape(search_term)
+        # Token-Caching für die Session
+        if "ebay_token" not in st.session_state:
+            st.session_state.ebay_token = None
+        if not st.session_state.ebay_token:
+            st.session_state.ebay_token = get_ebay_token()
+        items += ebay_api_search(search_term, token=st.session_state.ebay_token)
     if use_kleinanzeigen:
         items += kleinanzeigen_scraper(search_term)
 
@@ -532,11 +463,6 @@ def main():
             "Vinted-Ergebnisse konnten nicht geladen werden."
         )
 
-    if st.session_state.get("ebay_blocked"):
-        st.warning(
-            "eBay blockiert automatische Abfragen (Bot-Schutz). "
-            "eBay-Ergebnisse konnten nicht geladen werden."
-        )
 
     items = sort_items(items, sort_option)
 
