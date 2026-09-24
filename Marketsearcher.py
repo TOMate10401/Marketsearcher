@@ -300,14 +300,22 @@ def ebay_api_search(search_term, token=None):
             price_value = _price_to_float(item["price"]["value"])
             price_str = f"{item['price']['value']} {item['price'].get('currency', 'EUR')}"
 
+        image = item.get("image") or {}
+        image_url = image.get("imageUrl", "")
+        if not image_url:
+            for thumb in item.get("thumbnailImages") or []:
+                image_url = thumb.get("imageUrl", "")
+                if image_url:
+                    break
+        link = item.get("itemAffiliateWebUrl") or item.get("itemWebUrl", "")
         ebay_items.append(
             {
                 "source": "eBay",
                 "title": item.get("title", ""),
                 "price": price_str,
                 "price_value": price_value,
-                "link": item.get("itemAffiliateWebUrl", ""),
-                "image_url": item.get("image", {}).get("imageUrl", ""),
+                "link": link,
+                "image_url": image_url,
                 "condition": item.get("condition", ""),
             }
         )
