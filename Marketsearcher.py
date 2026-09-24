@@ -181,16 +181,22 @@ def _get(url):
     return requests.get(url, headers=HEADERS, timeout=20)
 
 
-def _load_image_bytes(url):
-    if not url:
-        return None
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_image_bytes(url):
     try:
         resp = _get(url)
         if resp.status_code == 200 and resp.content:
-            return BytesIO(resp.content)
+            return resp.content
     except requests.RequestException:
         pass
     return None
+
+
+def _load_image_bytes(url):
+    if not url:
+        return None
+    data = _fetch_image_bytes(url)
+    return BytesIO(data) if data else None
 
 
 def vinted_scrape(search_term):
