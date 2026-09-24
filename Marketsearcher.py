@@ -239,7 +239,7 @@ def vinted_scrape(search_term):
         return []
 
     soup = BeautifulSoup(page.content, features="lxml")
-    items = soup.find_all("div", class_="feed-grid__item")
+    items = soup.find_all(attrs={"data-testid": "grid-item"})
 
     vinted_items = []
     for item in items:
@@ -258,16 +258,26 @@ def vinted_scrape(search_term):
             el = item.find(tag, {"data-testid": testid})
             return el[attr] if el and el.has_attr(attr) else ""
 
+        overlay = item.find(
+            "a", {"data-testid": f"product-item-id-{product_id}--overlay-link"}
+        )
+        full_title = ""
+        if overlay and overlay.get("title"):
+            full_title = overlay["title"].split(", Marke:")[0].strip()
         item_dict = {
             "source": "Vinted",
             "product_id": product_id,
-            "title": _text(f"product-item-id-{product_id}--description-title"),
+            "title": full_title
+            or _text(f"product-item-id-{product_id}--description-title"),
             "price": _text(f"product-item-id-{product_id}--price-text"),
             "condition": _text(
                 f"product-item-id-{product_id}--description-subtitle"
             ),
-            "link": _attr(
-                "a", f"product-item-id-{product_id}--overlay-link", "href"
+            "link": (
+                "https://www.vinted.de"
+                + _attr(
+                    "a", f"product-item-id-{product_id}--overlay-link", "href"
+                )
             ),
             "image_url": _attr(
                 "img", f"product-item-id-{product_id}--image--img", "src"
