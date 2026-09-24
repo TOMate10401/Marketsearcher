@@ -159,10 +159,17 @@ def get_ebay_token():
 
 
 def _price_to_float(price_str):
-    if not price_str:
+    if price_str is None:
         return None
-    cleaned = re.sub(r"[^\d,\.]", "", price_str)
-    cleaned = cleaned.replace(".", "").replace(",", ".")
+    if isinstance(price_str, (int, float)):
+        return float(price_str)
+    if not price_str.strip():
+        return None
+    cleaned = re.sub(r"[^\d,\.]", "", price_str.strip())
+    if not cleaned:
+        return None
+    if "," in cleaned:
+        cleaned = cleaned.replace(".", "").replace(",", ".")
     try:
         return float(cleaned)
     except ValueError:
@@ -387,16 +394,18 @@ def kleinanzeigen_scraper(search_term):
 def sort_items(items, key):
     if not items:
         return items
+    def _price_key(d):
+        v = d.get("price_value")
+        return v if v is not None else float("inf")
+
+    def _price_key_desc(d):
+        v = d.get("price_value")
+        return v if v is not None else float("-inf")
+
     if key == "Preis aufsteigend":
-        return sorted(
-            items, key=lambda d: d.get("price_value") or float("inf")
-        )
+        return sorted(items, key=_price_key)
     if key == "Preis absteigend":
-        return sorted(
-            items,
-            key=lambda d: d.get("price_value") or float("inf"),
-            reverse=True,
-        )
+        return sorted(items, key=_price_key_desc, reverse=True)
     if key == "Titel":
         return sorted(items, key=lambda d: d.get("title", "").lower())
     return items
