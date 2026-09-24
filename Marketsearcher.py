@@ -2,6 +2,7 @@ import json
 import os
 import re
 import base64
+from io import BytesIO
 
 import requests
 from bs4 import BeautifulSoup
@@ -178,6 +179,18 @@ def _price_to_float(price_str):
 
 def _get(url):
     return requests.get(url, headers=HEADERS, timeout=20)
+
+
+def _load_image_bytes(url):
+    if not url:
+        return None
+    try:
+        resp = _get(url)
+        if resp.status_code == 200 and resp.content:
+            return BytesIO(resp.content)
+    except requests.RequestException:
+        pass
+    return None
 
 
 def vinted_scrape(search_term):
@@ -494,7 +507,9 @@ def main():
         if item["link"]:
             st.write(f"Link: {item['link']}")
         if item["image_url"]:
-            st.image(item["image_url"])
+            img_data = _load_image_bytes(item["image_url"])
+            if img_data:
+                st.image(img_data)
         st.divider()
 
 
