@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -7,14 +8,7 @@ from io import BytesIO
 import requests
 import streamlit as st
 
-from config import load_env
 from constants import CATEGORIES, HEADERS
-from filtering import (
-    filter_by_keywords,
-    filter_by_price,
-    parse_exclude,
-    sort_items,
-)
 from favorites import (
     add_favorite,
     item_key,
@@ -23,7 +17,23 @@ from favorites import (
     remove_favorite,
     save_favorites,
 )
+from filtering import (
+    filter_by_keywords,
+    filter_by_price,
+    parse_exclude,
+    sort_items,
+)
 from scrapers import get_ebay_token, run_sources
+
+
+SORT_OPTIONS = (
+    "Keine Sortierung",
+    "Preis aufsteigend",
+    "Preis absteigend",
+    "Titel",
+)
+
+RADIUS_OPTIONS = (5, 10, 20, 50, 100, 200)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -50,6 +60,33 @@ def _search_signature(search_term, use_vinted, use_ebay, use_kleinanzeigen):
     return json.dumps(sig, sort_keys=True, default=str)
 
 
+def _fav_button_key(key):
+    return hashlib.md5(key.encode("utf-8")).hexdigest()
+
+
+def _saved(key, default):
+    return st.session_state.get("saved_search", {}).get(key, default)
+
+
+def _save_search_state(search_term, use_vinted, use_ebay, use_kleinanzeigen, sort_option):
+    st.session_state.saved_search = {
+        "category": search_term["category"],
+        "term": search_term["term"],
+        "use_vinted": use_vinted,
+        "use_ebay": use_ebay,
+        "use_kleinanzeigen": use_kleinanzeigen,
+        "gender": search_term.get("gender", ""),
+        "size": search_term.get("size", []),
+        "condition": search_term.get("condition", []),
+        "min_price": search_term["min_price"],
+        "max_price": search_term["max_price"],
+        "exclude": search_term["exclude"],
+        "zip": search_term["zip"],
+        "radius": search_term["radius"],
+        "sort": sort_option,
+    }
+
+
 def _render_card(item, favorites):
     key = item_key(item)
     is_favorite = key in favorites
@@ -69,33 +106,29 @@ def _render_card(item, favorites):
         else:
             st.markdown(f"**{title_str}**")
 
-        meta = [item.get("source", "")]
         if item.get("distance"):
-            meta.append(item["distance"])
-        st.caption(" · ".join(m for m in meta if m))
+            st.caption(item["distance"])
 
         if item.get("price"):
             st.markdown(f"💰 **{item['price']}**")
         if item.get("condition"):
             st.caption(f"Zustand: {item['condition']}")
 
-        col_link, col_fav = st.columns([3, 1])
-        with col_link:
-            if link:
-                st.markdown(f"[🔗 Link]({link})")
-        with col_fav:
-            fav_label = "★" if is_favorite else "☆"
-            if st.button(fav_label, key=f"fav-{abs(hash(key))}", use_container_width=True):
-                if is_favorite:
-                    remove_favorite(st.session_state.favorites, item)
-                else:
-                    add_favorite(
-                        st.session_state.favorites,
-                        item,
-                        datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    )
-                save_favorites(st.session_state.favorites)
-                st.rerun()
+        if st.button(
+            "★" if is_favorite else "☆",
+            key=f"fav-{_fav_button_key(key)}",
+            use_container_width=True,
+        ):
+            if is_favorite:
+                remove_favorite(st.session_state.favorites, item)
+            else:
+                add_favorite(
+                    st.session_state.favorites,
+                    item,
+                    datetime.now().strftime("%Y-%m-%d %H:%M"),
+                )
+            save_favorites(st.session_state.favorites)
+            st.rerun()
 
 
 def _render_grid(items, favorites, columns=3):
@@ -108,6 +141,128 @@ def _render_grid(items, favorites, columns=3):
             _render_card(item, favorites)
 
 
+def _render_favorites_page():
+    favorites = st.session_state.favorites
+
+    head_col, back_col, clear_col = st.columns([3, 2, 2])
+    with head_col:
+        st.header(f"⭐ Favoriten ({len(favorites)})")
+    with back_col:
+        if st.button("← Zurück zur Suche", use_container_width=True):
+            st.session_state.view = "search"
+            st.rerun()
+    with clear_col:
+        if st.button("🗑 Alle löschen", use_container_width=True):
+            st.session_state.favorites = {}
+            save_favorites({})
+            st.rerun()
+
+    if not favorites:
+        st.info(
+            "Noch keine Favoriten gespeichert. "
+            "Markiere Artikel in der Suche mit ☆, um sie hier zu sammeln."
+        )
+        return
+
+    st.download_button(
+        "⬇️ Favoriten als CSV",
+        data=items_to_csv(list(favorites.values())),
+        file_name="marketsearcher_favoriten.csv",
+        mime="text/csv",
+    )
+
+    _render_grid(list(favorites.values()), favorites)
+
+
+def _build_search_term():
+    saved_category = _saved("category", "Alle Kategorien")
+    if saved_category not in CATEGORIES:
+        saved_category = "Alle Kategorien"
+
+    saved_gender = _saved("gender", "")
+    gender_options = ("", "male", "female")
+    gender_index = (
+        gender_options.index(saved_gender) if saved_gender in gender_options else 0
+    )
+
+    saved_radius = _saved("radius", 50)
+    radius_index = (
+        RADIUS_OPTIONS.index(saved_radius)
+        if saved_radius in RADIUS_OPTIONS
+        else RADIUS_OPTIONS.index(50)
+    )
+
+    saved_sort = _saved("sort", "Keine Sortierung")
+    sort_index = (
+        SORT_OPTIONS.index(saved_sort) if saved_sort in SORT_OPTIONS else 0
+    )
+
+    search_term = {}
+    search_term["category"] = st.selectbox(
+        "Kategorie", CATEGORIES, index=CATEGORIES.index(saved_category)
+    )
+    search_term["term"] = st.text_input("Suchbegriff", value=_saved("term", ""))
+
+    with st.expander("Erweiterte Filter"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            use_vinted = st.checkbox("Vinted", value=_saved("use_vinted", True))
+        with col2:
+            use_ebay = st.checkbox("eBay", value=_saved("use_ebay", True))
+        with col3:
+            use_kleinanzeigen = st.checkbox(
+                "Kleinanzeigen", value=_saved("use_kleinanzeigen", True)
+            )
+
+        is_fashion = search_term["category"] in ("Alle Kategorien", "Mode & Kleidung")
+
+        if is_fashion:
+            search_term["gender"] = st.selectbox(
+                "Gender", gender_options, index=gender_index
+            )
+            search_term["size"] = st.multiselect(
+                "Größe", ("XS", "S", "M", "L", "XL", "XXL"),
+                default=_saved("size", []),
+            )
+            search_term["condition"] = st.multiselect(
+                "Zustand", ("neu", "wie neu", "sehr gut", "gut", "gebraucht"),
+                default=_saved("condition", []),
+            )
+        else:
+            search_term["gender"] = ""
+            search_term["size"] = []
+            search_term["condition"] = []
+
+        sc1, sc2 = st.columns(2)
+        search_term["min_price"] = sc1.text_input(
+            "Mindestpreis (EUR)", value=_saved("min_price", "")
+        )
+        search_term["max_price"] = sc2.text_input(
+            "Maximalpreis (EUR)", value=_saved("max_price", "")
+        )
+
+        search_term["exclude"] = st.text_input(
+            "Ausschließen (kommagetrennt, z.B. defekt, Ersatzteile)",
+            value=_saved("exclude", ""),
+        )
+
+        loc1, loc2 = st.columns(2)
+        search_term["zip"] = loc1.text_input(
+            "PLZ (optional, nur eBay & Kleinanzeigen)", value=_saved("zip", "")
+        )
+        search_term["radius"] = loc2.selectbox(
+            "Umkreis (km)", RADIUS_OPTIONS, index=radius_index
+        )
+
+        if search_term["zip"].strip() and use_vinted:
+            st.caption(
+                "ℹ️ Der Standortfilter wirkt nicht bei Vinted "
+                "(Versand-Marktplatz ohne Standortsuche)."
+            )
+
+    return search_term, use_vinted, use_ebay, use_kleinanzeigen, sort_index
+
+
 def main():
     st.title("Marketsearcher")
 
@@ -117,59 +272,33 @@ def main():
     if "favorites" not in st.session_state:
         st.session_state.favorites = load_favorites()
 
-    search_term = {}
-    search_term["category"] = st.selectbox("Kategorie", CATEGORIES)
-    search_term["term"] = st.text_input("Suchbegriff", "")
+    if st.session_state.get("view") == "favorites":
+        _render_favorites_page()
+        return
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        use_vinted = st.checkbox("Vinted", value=True)
-    with col2:
-        use_ebay = st.checkbox("eBay", value=True)
-    with col3:
-        use_kleinanzeigen = st.checkbox("Kleinanzeigen", value=True)
-
-    is_fashion = search_term["category"] in ("Alle Kategorien", "Mode & Kleidung")
-
-    if is_fashion:
-        search_term["gender"] = st.selectbox("Gender", ("", "male", "female"))
-        search_term["size"] = st.multiselect(
-            "Größe", ("XS", "S", "M", "L", "XL", "XXL")
-        )
-        search_term["condition"] = st.multiselect(
-            "Zustand", ("neu", "wie neu", "sehr gut", "gut", "gebraucht")
-        )
-    else:
-        search_term["gender"] = ""
-        search_term["size"] = []
-        search_term["condition"] = []
-
-    sc1, sc2 = st.columns(2)
-    search_term["min_price"] = sc1.text_input("Mindestpreis (EUR)", "")
-    search_term["max_price"] = sc2.text_input("Maximalpreis (EUR)", "")
-
-    search_term["exclude"] = st.text_input(
-        "Ausschließen (kommagetrennt, z.B. defekt, Ersatzteile)", ""
-    )
-
-    loc1, loc2 = st.columns(2)
-    search_term["zip"] = loc1.text_input(
-        "PLZ (optional, nur eBay & Kleinanzeigen)", ""
-    )
-    search_term["radius"] = loc2.selectbox(
-        "Umkreis (km)", (5, 10, 20, 50, 100, 200), index=3
-    )
-
-    if search_term["zip"].strip() and use_vinted:
-        st.caption(
-            "ℹ️ Der Standortfilter wirkt nicht bei Vinted "
-            "(Versand-Marktplatz ohne Standortsuche)."
+    fav_col = st.columns([4, 1])[1]
+    with fav_col:
+        fav_clicked = st.button(
+            f"⭐ Favoriten ({len(st.session_state.favorites)})",
+            use_container_width=True,
         )
 
-    sort_option = st.selectbox(
-        "Sortieren nach", ("Keine Sortierung", "Preis aufsteigend",
-                           "Preis absteigend", "Titel")
-    )
+    (
+        search_term,
+        use_vinted,
+        use_ebay,
+        use_kleinanzeigen,
+        sort_index,
+    ) = _build_search_term()
+
+    sort_option = st.selectbox("Sortieren nach", SORT_OPTIONS, index=sort_index)
+
+    if fav_clicked:
+        _save_search_state(
+            search_term, use_vinted, use_ebay, use_kleinanzeigen, sort_option
+        )
+        st.session_state.view = "favorites"
+        st.rerun()
 
     if not search_term["term"].strip():
         st.info("Suchbegriff eingeben, um Ergebnisse zu sehen.")
@@ -220,41 +349,19 @@ def main():
 
     favorites = st.session_state.favorites
 
-    with st.sidebar:
-        st.subheader(f"⭐ Favoriten ({len(favorites)})")
-        show_favorites = st.checkbox("Nur Favoriten anzeigen")
-        if st.checkbox("Alle Favoriten löschen"):
-            st.session_state.favorites = {}
-            save_favorites({})
-            st.rerun()
-
     exclude_words = parse_exclude(search_term.get("exclude"))
-    items = st.session_state.result_items
-    if show_favorites:
-        items = [it for it in items if item_key(it) in favorites]
-    items = filter_by_keywords(items, exclude_words)
+    items = filter_by_keywords(st.session_state.result_items, exclude_words)
     items = filter_by_price(items, search_term)
     items = sort_items(items, sort_option)
 
     st.caption(f"{len(items)} Ergebnisse · Seite {st.session_state.result_page}")
 
-    exp1, exp2 = st.columns(2)
-    with exp1:
-        st.download_button(
-            "⬇️ Ergebnisse als CSV",
-            data=items_to_csv(items),
-            file_name="marketsearcher_ergebnisse.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-    with exp2:
-        st.download_button(
-            "⬇️ Favoriten als CSV",
-            data=items_to_csv(list(favorites.values())),
-            file_name="marketsearcher_favoriten.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+    st.download_button(
+        "⬇️ Ergebnisse als CSV",
+        data=items_to_csv(items),
+        file_name="marketsearcher_ergebnisse.csv",
+        mime="text/csv",
+    )
 
     _render_grid(items, favorites)
 
