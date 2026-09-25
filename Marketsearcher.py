@@ -2,6 +2,7 @@ import json
 import os
 import re
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
 import requests
@@ -190,6 +191,12 @@ def _parse_price_filter(value):
     return parsed if parsed >= 0 else None
 
 
+def _parse_exclude(value):
+    if not value:
+        return []
+    return [w.strip().lower() for w in str(value).split(",") if w.strip()]
+
+
 def _get(url):
     return requests.get(url, headers=HEADERS, timeout=20)
 
@@ -213,11 +220,12 @@ def _load_image_bytes(url):
 
 
 def vinted_scrape(search_term):
+    """Liefert (items, blocked). Keine Streamlit-Aufrufe (thread-sicher)."""
     category = search_term.get("category", "Alle Kategorien")
     vinted_cat = CATEGORY_MAP.get(category, {}).get("vinted")
 
     if category != "Alle Kategorien" and not vinted_cat:
-        return []
+        return [], False
 
     term = search_term["term"].strip().replace(" ", "+")
     url = "https://www.vinted.de/catalog?search_text=" + term
@@ -247,11 +255,10 @@ def vinted_scrape(search_term):
     try:
         page = _get(url)
     except requests.RequestException:
-        return []
+        return [], False
 
     if page.status_code != 200:
-        st.session_state["vinted_blocked"] = True
-        return []
+        return [], True
 
     soup = BeautifulSoup(page.content, features="lxml")
     items = soup.find_all(attrs={"data-testid": "grid-item"})
@@ -301,34 +308,33 @@ def vinted_scrape(search_term):
         item_dict["price_value"] = _price_to_float(item_dict["price"])
         vinted_items.append(item_dict)
 
-    return vinted_items
+    return vinted_items, False
 
 
-def ebay_api_search(search_term, token=None):
-    """Suche über die eBay Browse API (Production)."""
+def ebay_api_search(search_term, token=None, page=1):
+    """Suche über die eBay Browse API (Production). Liefert (items, errors)."""
     base_url = "https://api.ebay.com"
 
-    # Token holen, falls nicht mitgegeben
     if not token:
         token = get_ebay_token()
         if not token:
-            st.error("eBay Token konnte nicht generiert werden. Prüfe .env-Datei.")
-            return []
+            return [], ["eBay Token konnte nicht generiert werden. Prüfe .env-Datei."]
 
     term = search_term["term"].strip()
     category = search_term.get("category", "Alle Kategorien")
     ebay_cat = CATEGORY_MAP.get(category, {}).get("ebay")
 
     if category != "Alle Kategorien" and not ebay_cat:
-        return []
+        return [], []
 
-    # API-Request
     url = f"{base_url}/buy/browse/v1/item_summary/search"
     headers = {
         "Authorization": f"Bearer {token}",
         "X-EBAY-C-MARKETPLACE-ID": "EBAY_DE",
     }
     params = {"q": term, "limit": 50}
+    if page > 1:
+        params["offset"] = (page - 1) * params["limit"]
 
     filters = []
     if ebay_cat:
@@ -340,20 +346,27 @@ def ebay_api_search(search_term, token=None):
     if min_price is not None or max_price is not None:
         filters.append(f"price:{price_range}")
 
+    zip_code = (search_term.get("zip") or "").strip()
+    radius = search_term.get("radius")
+    if zip_code and radius:
+        filters.append(f"pickupPostalCode:{zip_code}")
+        filters.append("pickupCountry:DE")
+        filters.append(f"pickupRadius:{int(radius)}")
+        filters.append("pickupRadiusUnit:km")
+
     if filters:
         params["filter"] = ",".join(filters)
 
     try:
         resp = requests.get(url, headers=headers, params=params, timeout=20)
         if resp.status_code != 200:
-            st.warning(f"eBay API Fehler: {resp.status_code} - {resp.text}")
-            return []
+            return [], [f"eBay API Fehler: {resp.status_code} - {resp.text}"]
         data = resp.json()
     except requests.RequestException as e:
-        st.error(f"eBay API Request fehlgeschlagen: {e}")
-        return []
+        return [], [f"eBay API Request fehlgeschlagen: {e}"]
+    except ValueError:
+        return [], ["eBay API Antwort war kein gültiges JSON."]
 
-    # Ergebnisse parsen
     ebay_items = []
     for item in data.get("itemSummaries", []):
         price_value = None
@@ -370,6 +383,12 @@ def ebay_api_search(search_term, token=None):
                 if image_url:
                     break
         link = item.get("itemAffiliateWebUrl") or item.get("itemWebUrl", "")
+
+        distance = ""
+        item_distance = item.get("itemDistance") or {}
+        if item_distance.get("value") is not None:
+            distance = f"{item_distance.get('value')} {item_distance.get('unit', 'km')}"
+
         ebay_items.append(
             {
                 "source": "eBay",
@@ -379,12 +398,13 @@ def ebay_api_search(search_term, token=None):
                 "link": link,
                 "image_url": image_url,
                 "condition": item.get("condition", ""),
+                "distance": distance,
             }
         )
-    return ebay_items
+    return ebay_items, []
 
 
-def kleinanzeigen_scraper(search_term):
+def kleinanzeigen_scraper(search_term, page=1):
     category = search_term.get("category", "Alle Kategorien")
     ka_cat = CATEGORY_MAP.get(category, {}).get("kleinanzeigen")
 
@@ -397,24 +417,32 @@ def kleinanzeigen_scraper(search_term):
     else:
         url = f"https://www.kleinanzeigen.de/s-{term}/k0"
 
-    price_params = []
+    zip_code = (search_term.get("zip") or "").strip()
+    radius = search_term.get("radius")
+    if zip_code and radius:
+        url += f"l{zip_code}r{int(radius)}"
+
+    params = []
     min_price = _parse_price_filter(search_term.get("min_price"))
     if min_price is not None:
-        price_params.append(f"price_min={int(min_price)}")
+        params.append(f"price_min={int(min_price)}")
 
     max_price = _parse_price_filter(search_term.get("max_price"))
     if max_price is not None:
-        price_params.append(f"price_max={int(max_price)}")
+        params.append(f"price_max={int(max_price)}")
 
-    if price_params:
-        url += "?" + "&".join(price_params)
+    if page > 1:
+        params.append(f"pageNum={page}")
+
+    if params:
+        url += "?" + "&".join(params)
 
     try:
-        page = _get(url)
+        page_resp = _get(url)
     except requests.RequestException:
         return []
 
-    soup = BeautifulSoup(page.content, features="lxml")
+    soup = BeautifulSoup(page_resp.content, features="lxml")
     articles = soup.find_all("article", attrs={"data-adid": True})
 
     items = []
@@ -458,6 +486,41 @@ def kleinanzeigen_scraper(search_term):
     return items
 
 
+def run_sources(search_term, token, page, use_vinted, use_ebay, use_kleinanzeigen):
+    """Führt alle aktiven Quellen parallel aus. Liefert (items, vinted_blocked, errors)."""
+    items = []
+    errors = []
+    vinted_blocked = False
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {}
+        if use_vinted and page == 1:
+            futures[executor.submit(vinted_scrape, search_term)] = "vinted"
+        if use_ebay:
+            futures[executor.submit(ebay_api_search, search_term, token, page)] = "ebay"
+        if use_kleinanzeigen:
+            futures[executor.submit(kleinanzeigen_scraper, search_term, page)] = "kleinanzeigen"
+
+        for future, source in futures.items():
+            try:
+                result = future.result()
+            except Exception as exc:
+                errors.append(f"{source}: Unerwarteter Fehler ({exc})")
+                continue
+
+            if source == "vinted":
+                source_items, vinted_blocked = result
+            elif source == "ebay":
+                source_items, source_errors = result
+                errors.extend(source_errors)
+            else:
+                source_items = result
+
+            items.extend(source_items)
+
+    return items, vinted_blocked, errors
+
+
 def filter_by_price(items, search_term):
     min_price = _parse_price_filter(search_term.get("min_price"))
     max_price = _parse_price_filter(search_term.get("max_price"))
@@ -476,6 +539,16 @@ def filter_by_price(items, search_term):
             continue
         filtered.append(item)
     return filtered
+
+
+def filter_by_keywords(items, exclude_words):
+    if not exclude_words:
+        return items
+    return [
+        item
+        for item in items
+        if not any(w in (item.get("title") or "").lower() for w in exclude_words)
+    ]
 
 
 def sort_items(items, key):
@@ -498,11 +571,59 @@ def sort_items(items, key):
     return items
 
 
+def _search_signature(search_term, use_vinted, use_ebay, use_kleinanzeigen):
+    sig = {k: v for k, v in search_term.items() if k != "exclude"}
+    sig["sources"] = [use_vinted, use_ebay, use_kleinanzeigen]
+    return json.dumps(sig, sort_keys=True, default=str)
+
+
+def _item_key(item):
+    return (item.get("source"), item.get("link") or item.get("title"))
+
+
+def _render_card(item):
+    with st.container(border=True):
+        img_data = _load_image_bytes(item.get("image_url"))
+        if img_data:
+            st.image(img_data)
+
+        title = (item.get("title") or "").strip() or "(ohne Titel)"
+        safe_title = title.replace("[", "(").replace("]", ")")
+        link = item.get("link") or ""
+
+        if link:
+            st.markdown(f"**[{safe_title}]({link})**")
+        else:
+            st.markdown(f"**{safe_title}**")
+
+        meta = [item.get("source", "")]
+        if item.get("distance"):
+            meta.append(item["distance"])
+        st.caption(" · ".join(m for m in meta if m))
+
+        if item.get("price"):
+            st.markdown(f"💰 **{item['price']}**")
+        if item.get("condition"):
+            st.caption(f"Zustand: {item['condition']}")
+        if link:
+            st.markdown(f"[🔗 Link]({link})")
+
+
+def _render_grid(items, columns=3):
+    if not items:
+        st.info("Keine Ergebnisse gefunden.")
+        return
+    cols = st.columns(columns)
+    for idx, item in enumerate(items):
+        with cols[idx % columns]:
+            _render_card(item)
+
+
 def main():
     st.title("Marketsearcher")
 
     os.environ["EBAY_ENV"] = "production"
-    st.caption("🔹 Verwende eBay Production (echte Daten)")
+    st.caption("🔷 Verwende eBay Production (echte Daten)")
 
     search_term = {}
     search_term["category"] = st.selectbox("Kategorie", CATEGORIES)
@@ -537,6 +658,24 @@ def main():
     search_term["min_price"] = sc1.text_input("Mindestpreis (EUR)", "")
     search_term["max_price"] = sc2.text_input("Maximalpreis (EUR)", "")
 
+    search_term["exclude"] = st.text_input(
+        "Ausschließen (kommagetrennt, z.B. defekt, Ersatzteile)", ""
+    )
+
+    loc1, loc2 = st.columns(2)
+    search_term["zip"] = loc1.text_input(
+        "PLZ (optional, nur eBay & Kleinanzeigen)", ""
+    )
+    search_term["radius"] = loc2.selectbox(
+        "Umkreis (km)", (5, 10, 20, 50, 100, 200), index=3
+    )
+
+    if search_term["zip"].strip() and use_vinted:
+        st.caption(
+            "ℹ️ Der Standortfilter wirkt nicht bei Vinted "
+            "(Versand-Marktplatz ohne Standortsuche)."
+        )
+
     sort_option = st.selectbox(
         "Sortieren nach", ("Keine Sortierung", "Preis aufsteigend",
                            "Preis absteigend", "Titel")
@@ -546,46 +685,78 @@ def main():
         st.info("Suchbegriff eingeben, um Ergebnisse zu sehen.")
         return
 
-    st.session_state["vinted_blocked"] = False
+    zip_clean = re.sub(r"\D", "", search_term["zip"])
+    if search_term["zip"].strip() and len(zip_clean) != 5:
+        st.warning("Bitte eine gültige 5-stellige PLZ angeben.")
+        return
+    search_term["zip"] = zip_clean
+    if not zip_clean:
+        search_term["radius"] = None
 
-    items = []
-    if use_vinted:
-        items += vinted_scrape(search_term)
     if use_ebay:
-        # Token-Caching für die Session
         if "ebay_token" not in st.session_state:
             st.session_state.ebay_token = None
         if not st.session_state.ebay_token:
             st.session_state.ebay_token = get_ebay_token()
-        items += ebay_api_search(search_term, token=st.session_state.ebay_token)
-    if use_kleinanzeigen:
-        items += kleinanzeigen_scraper(search_term)
 
-    if st.session_state.get("vinted_blocked"):
+    sig = _search_signature(search_term, use_vinted, use_ebay, use_kleinanzeigen)
+    if st.session_state.get("search_sig") != sig:
+        st.session_state.search_sig = sig
+        st.session_state.result_items = []
+        st.session_state.result_page = 0
+        st.session_state.search_errors = []
+        st.session_state.vinted_blocked = False
+        st.session_state.no_more = False
+
+    token = st.session_state.get("ebay_token")
+
+    if st.session_state.result_page == 0:
+        new_items, blocked, errors = run_sources(
+            search_term, token, 1, use_vinted, use_ebay, use_kleinanzeigen
+        )
+        st.session_state.result_items = new_items
+        st.session_state.result_page = 1
+        st.session_state.search_errors = errors
+        st.session_state.vinted_blocked = blocked
+
+    for err in st.session_state.search_errors:
+        st.warning(err)
+
+    if st.session_state.vinted_blocked:
         st.warning(
             "Vinted blockiert automatische Abfragen (Bot-Schutz). "
             "Vinted-Ergebnisse konnten nicht geladen werden."
         )
 
-
+    exclude_words = _parse_exclude(search_term.get("exclude"))
+    items = filter_by_keywords(st.session_state.result_items, exclude_words)
     items = filter_by_price(items, search_term)
     items = sort_items(items, sort_option)
 
-    st.caption(f"{len(items)} Ergebnisse")
-    for item in items:
-        st.subheader(item["title"])
-        st.caption(item["source"])
-        if item["condition"]:
-            st.write(f"Zustand: {item['condition']}")
-        if item["price"]:
-            st.write(f"Preis: {item['price']}")
-        if item["link"]:
-            st.write(f"Link: {item['link']}")
-        if item["image_url"]:
-            img_data = _load_image_bytes(item["image_url"])
-            if img_data:
-                st.image(img_data)
-        st.divider()
+    st.caption(
+        f"{len(items)} Ergebnisse · Seite {st.session_state.result_page}"
+    )
+
+    _render_grid(items)
+
+    if st.session_state.get("no_more"):
+        st.caption("Keine weiteren Ergebnisse.")
+        return
+
+    if st.button("Mehr laden"):
+        next_page = st.session_state.result_page + 1
+        new_items, _blocked, errors = run_sources(
+            search_term, token, next_page, use_vinted, use_ebay, use_kleinanzeigen
+        )
+        existing = {_item_key(it) for it in st.session_state.result_items}
+        added = [it for it in new_items if _item_key(it) not in existing]
+        st.session_state.result_items += added
+        st.session_state.result_page = next_page
+        if errors:
+            st.session_state.search_errors += errors
+        if not added:
+            st.session_state.no_more = True
+        st.rerun()
 
 
 if __name__ == "__main__":
