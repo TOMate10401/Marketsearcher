@@ -123,7 +123,7 @@ def _render_card(item, favorites):
         if item.get("price"):
             st.markdown(f"💰 **{item['price']}**")
         if item.get("condition"):
-            st.caption(f"Zustand: {item['condition']}")
+            st.caption(item["condition"])
 
         if st.button(
             "★" if is_favorite else "☆",
@@ -181,10 +181,7 @@ def _render_favorite_card(entry, favorites):
                 st.markdown(f"💰 **{entry['price']}**")
 
         if entry.get("condition"):
-            st.caption(f"Zustand: {entry['condition']}")
-
-        if entry.get("last_checked"):
-            st.caption(f"Geprüft: {entry['last_checked']}")
+            st.caption(entry["condition"])
 
         if st.button(
             "★" if is_favorite else "☆",

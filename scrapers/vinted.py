@@ -72,7 +72,9 @@ def vinted_scrape(search_term):
         )
         full_title = ""
         if overlay and overlay.get("title"):
-            full_title = overlay["title"].split(", Marke:")[0].strip()
+            full_title = overlay["title"].split(", Marke:")[0]
+            full_title = full_title.split(", Zustand:")[0]
+            full_title = full_title.split(", Größe:")[0].strip()
         item_dict = {
             "source": "Vinted",
             "product_id": product_id,
