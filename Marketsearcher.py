@@ -177,6 +177,19 @@ def _price_to_float(price_str):
         return None
 
 
+def _parse_price_filter(value):
+    if value in ("", None):
+        return None
+    cleaned = str(value).strip().replace(",", ".")
+    if not cleaned:
+        return None
+    try:
+        parsed = float(cleaned)
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
+
+
 def _get(url):
     return requests.get(url, headers=HEADERS, timeout=20)
 
@@ -223,11 +236,13 @@ def vinted_scrape(search_term):
         for x in search_term["condition"]:
             url += "&status_ids[]=" + VINTED_CONDITION[x]
 
-    if search_term.get("min_price") not in ("", None):
-        url += "&price_from=" + str(search_term["min_price"])
+    min_price = _parse_price_filter(search_term.get("min_price"))
+    if min_price is not None:
+        url += "&price_from=" + str(min_price)
 
-    if search_term.get("max_price") not in ("", None):
-        url += "&price_to=" + str(search_term["max_price"])
+    max_price = _parse_price_filter(search_term.get("max_price"))
+    if max_price is not None:
+        url += "&price_to=" + str(max_price)
 
     try:
         page = _get(url)
@@ -314,8 +329,19 @@ def ebay_api_search(search_term, token=None):
         "X-EBAY-C-MARKETPLACE-ID": "EBAY_DE",
     }
     params = {"q": term, "limit": 50}
+
+    filters = []
     if ebay_cat:
-        params["filter"] = f"categories:{{{ebay_cat}}}"
+        filters.append(f"categories:{{{ebay_cat}}}")
+
+    min_price = _parse_price_filter(search_term.get("min_price"))
+    max_price = _parse_price_filter(search_term.get("max_price"))
+    price_range = f"[{min_price if min_price is not None else ''}..{max_price if max_price is not None else ''}]"
+    if min_price is not None or max_price is not None:
+        filters.append(f"price:{price_range}")
+
+    if filters:
+        params["filter"] = ",".join(filters)
 
     try:
         resp = requests.get(url, headers=headers, params=params, timeout=20)
@@ -371,6 +397,18 @@ def kleinanzeigen_scraper(search_term):
     else:
         url = f"https://www.kleinanzeigen.de/s-{term}/k0"
 
+    price_params = []
+    min_price = _parse_price_filter(search_term.get("min_price"))
+    if min_price is not None:
+        price_params.append(f"price_min={int(min_price)}")
+
+    max_price = _parse_price_filter(search_term.get("max_price"))
+    if max_price is not None:
+        price_params.append(f"price_max={int(max_price)}")
+
+    if price_params:
+        url += "?" + "&".join(price_params)
+
     try:
         page = _get(url)
     except requests.RequestException:
@@ -418,6 +456,26 @@ def kleinanzeigen_scraper(search_term):
         )
 
     return items
+
+
+def filter_by_price(items, search_term):
+    min_price = _parse_price_filter(search_term.get("min_price"))
+    max_price = _parse_price_filter(search_term.get("max_price"))
+    if min_price is None and max_price is None:
+        return items
+
+    filtered = []
+    for item in items:
+        price = item.get("price_value")
+        if price is None:
+            filtered.append(item)
+            continue
+        if min_price is not None and price < min_price:
+            continue
+        if max_price is not None and price > max_price:
+            continue
+        filtered.append(item)
+    return filtered
 
 
 def sort_items(items, key):
@@ -510,6 +568,7 @@ def main():
         )
 
 
+    items = filter_by_price(items, search_term)
     items = sort_items(items, sort_option)
 
     st.caption(f"{len(items)} Ergebnisse")
