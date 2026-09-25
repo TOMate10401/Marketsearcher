@@ -9,12 +9,20 @@ import requests
 import streamlit as st
 
 from constants import CATEGORIES, HEADERS
+from checker import (
+    STATUS_GONE,
+    check_favorites,
+    extract_item_id,
+    price_changed,
+)
 from favorites import (
     add_favorite,
+    apply_check_result,
     item_key,
     items_to_csv,
     load_favorites,
     remove_favorite,
+    remove_gone,
     save_favorites,
 )
 from filtering import (
@@ -87,6 +95,9 @@ def _save_search_state(search_term, use_vinted, use_ebay, use_kleinanzeigen, sor
     }
 
 
+CHECK_CACHE_TTL = 600
+
+
 def _render_card(item, favorites):
     key = item_key(item)
     is_favorite = key in favorites
@@ -131,6 +142,67 @@ def _render_card(item, favorites):
             st.rerun()
 
 
+def _render_favorite_card(entry, favorites):
+    """Karte für die Favoriten-Seite mit Verfügbarkeits-/Preis-Badge."""
+    key = item_key(entry)
+    is_favorite = key in favorites
+    gone = entry.get("check_status") == STATUS_GONE
+
+    with st.container(border=True):
+        if gone:
+            st.caption("Nicht mehr verfügbar")
+        img_data = None if gone else _load_image_bytes(entry.get("image_url"))
+        if img_data:
+            st.image(img_data)
+
+        title = (entry.get("title") or "").strip() or "(ohne Titel)"
+        safe_title = title.replace("[", "(").replace("]", ")")
+        link = entry.get("link") or ""
+
+        title_str = f"{'⭐ ' if is_favorite else ''}{safe_title}"
+        if link and not gone:
+            st.markdown(f"**[{title_str}]({link})**")
+        else:
+            st.markdown(f"**{title_str}**")
+
+        if entry.get("distance"):
+            st.caption(entry["distance"])
+
+        if gone:
+            st.markdown(f"~~{entry.get('price', '')}~~")
+        else:
+            current_price = entry.get("current_price") or ""
+            if current_price and price_changed(
+                entry.get("price_value"), entry.get("current_price_value")
+            ):
+                st.markdown(f"💰 **{current_price}**")
+                st.caption(f"Zuletzt gespeicherter Preis: {entry.get('price', '')}")
+            elif entry.get("price"):
+                st.markdown(f"💰 **{entry['price']}**")
+
+        if entry.get("condition"):
+            st.caption(f"Zustand: {entry['condition']}")
+
+        if entry.get("last_checked"):
+            st.caption(f"Geprüft: {entry['last_checked']}")
+
+        if st.button(
+            "★" if is_favorite else "☆",
+            key=f"fav-{_fav_button_key(key)}",
+            use_container_width=True,
+        ):
+            if is_favorite:
+                remove_favorite(st.session_state.favorites, entry)
+            else:
+                add_favorite(
+                    st.session_state.favorites,
+                    entry,
+                    datetime.now().strftime("%Y-%m-%d %H:%M"),
+                )
+            save_favorites(st.session_state.favorites)
+            st.rerun()
+
+
 def _render_grid(items, favorites, columns=3):
     if not items:
         st.info("Keine Ergebnisse gefunden.")
@@ -139,6 +211,39 @@ def _render_grid(items, favorites, columns=3):
     for idx, item in enumerate(items):
         with cols[idx % columns]:
             _render_card(item, favorites)
+
+
+def _run_favorites_check():
+    """Prüft alle Favoriten parallel, wenn der Cache abgelaufen ist."""
+    favorites = st.session_state.favorites
+    if not favorites:
+        return
+
+    now = datetime.now()
+    checked_at = now.strftime("%Y-%m-%d %H:%M")
+    cache_time = st.session_state.get("fav_check_time", {})
+
+    to_check = []
+    for key, entry in favorites.items():
+        if not entry.get("item_id"):
+            entry["item_id"] = extract_item_id(
+                entry.get("source"), entry.get("link")
+            )
+        if (now.timestamp() - cache_time.get(key, 0)) > CHECK_CACHE_TTL:
+            to_check.append(entry)
+
+    if not to_check:
+        return
+
+    token = st.session_state.get("ebay_token")
+    results = check_favorites(to_check, ebay_token=token)
+
+    for key, result in results.items():
+        apply_check_result(favorites, key, result, checked_at)
+        cache_time[key] = now.timestamp()
+
+    st.session_state.fav_check_time = cache_time
+    save_favorites(favorites)
 
 
 def _render_favorites_page():
@@ -152,9 +257,10 @@ def _render_favorites_page():
             st.session_state.view = "search"
             st.rerun()
     with clear_col:
-        if st.button("🗑 Alle löschen", use_container_width=True):
-            st.session_state.favorites = {}
-            save_favorites({})
+        if st.button("Erledigte entfernen", use_container_width=True):
+            cleaned, removed = remove_gone(st.session_state.favorites)
+            st.session_state.favorites = cleaned
+            save_favorites(cleaned)
             st.rerun()
 
     if not favorites:
@@ -164,6 +270,17 @@ def _render_favorites_page():
         )
         return
 
+    _run_favorites_check()
+
+    gone_count = sum(
+        1 for v in favorites.values() if v.get("check_status") == STATUS_GONE
+    )
+    if gone_count:
+        st.caption(
+            f"{gone_count} Favoriten sind nicht mehr verfügbar. "
+            "Mit 'Erledigte entfernen' kannst du sie aufräumen."
+        )
+
     st.download_button(
         "⬇️ Favoriten als CSV",
         data=items_to_csv(list(favorites.values())),
@@ -171,7 +288,14 @@ def _render_favorites_page():
         mime="text/csv",
     )
 
-    _render_grid(list(favorites.values()), favorites)
+    entries = list(st.session_state.favorites.values())
+    if not entries:
+        st.info("Keine Ergebnisse gefunden.")
+        return
+    cols = st.columns(3)
+    for idx, entry in enumerate(entries):
+        with cols[idx % 3]:
+            _render_favorite_card(entry, st.session_state.favorites)
 
 
 def _build_search_term():

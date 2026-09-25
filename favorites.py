@@ -14,8 +14,15 @@ FAVORITE_FIELDS = [
     "condition",
     "distance",
     "image_url",
+    "item_id",
     "saved_at",
+    "last_checked",
+    "check_status",
+    "current_price",
+    "current_price_value",
 ]
+
+CHECK_FIELDS = ("last_checked", "check_status", "current_price")
 
 
 def item_key(item):
@@ -42,7 +49,11 @@ def add_favorite(favorites, item, saved_at):
     key = item_key(item)
     if key in favorites:
         return favorites, False
-    entry = {field: item.get(field, "") for field in FAVORITE_FIELDS if field != "saved_at"}
+    entry = {
+        field: item.get(field, "")
+        for field in FAVORITE_FIELDS
+        if field not in ("saved_at",) and field not in CHECK_FIELDS
+    }
     entry["saved_at"] = saved_at
     favorites[key] = entry
     return favorites, True
@@ -54,6 +65,28 @@ def remove_favorite(favorites, item):
         return favorites, False
     del favorites[key]
     return favorites, True
+
+
+def apply_check_result(favorites, key, result, checked_at):
+    """Speichert das Check-Ergebnis an einem Favoriten."""
+    if key not in favorites:
+        return favorites
+    entry = favorites[key]
+    entry["last_checked"] = checked_at
+    entry["check_status"] = result.get("status", "")
+    if result.get("current_price"):
+        entry["current_price"] = result["current_price"]
+    if result.get("current_price_value") is not None:
+        entry["current_price_value"] = result["current_price_value"]
+    return favorites
+
+
+def remove_gone(favorites):
+    """Entfernt alle als 'gone' markierten Favoriten. Liefert (favorites, removed_count)."""
+    gone_keys = [k for k, v in favorites.items() if v.get("check_status") == "gone"]
+    for key in gone_keys:
+        del favorites[key]
+    return favorites, len(gone_keys)
 
 
 def items_to_csv(items):
