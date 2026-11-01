@@ -28,6 +28,8 @@ from favorites import (
 from filtering import (
     filter_by_keywords,
     filter_by_price,
+    filter_by_required,
+    filter_out_defective,
     parse_exclude,
     sort_items,
 )
@@ -63,7 +65,11 @@ def _load_image_bytes(url):
 
 
 def _search_signature(search_term, use_vinted, use_ebay, use_kleinanzeigen):
-    sig = {k: v for k, v in search_term.items() if k != "exclude"}
+    sig = {
+        k: v
+        for k, v in search_term.items()
+        if k not in ("exclude", "required", "required_title_only", "hide_defect")
+    }
     sig["sources"] = [use_vinted, use_ebay, use_kleinanzeigen]
     return json.dumps(sig, sort_keys=True, default=str)
 
@@ -89,6 +95,9 @@ def _save_search_state(search_term, use_vinted, use_ebay, use_kleinanzeigen, sor
         "min_price": search_term["min_price"],
         "max_price": search_term["max_price"],
         "exclude": search_term["exclude"],
+        "required": search_term["required"],
+        "required_title_only": search_term["required_title_only"],
+        "hide_defect": search_term["hide_defect"],
         "zip": search_term["zip"],
         "radius": search_term["radius"],
         "sort": sort_option,
@@ -367,6 +376,24 @@ def _build_search_term():
             value=_saved("exclude", ""),
         )
 
+        search_term["required"] = st.text_input(
+            "Muss enthalten (kommagetrennt, z.B. 3080, windforce)",
+            value=_saved("required", ""),
+        )
+        search_term["required_title_only"] = st.checkbox(
+            "Muss enthalten: nur im Titel suchen",
+            value=_saved("required_title_only", False),
+        )
+
+        search_term["hide_defect"] = st.checkbox(
+            "Defekte Artikel ausblenden",
+            value=_saved("hide_defect", False),
+            help=(
+                "Blendet Artikel mit 'defekt', 'Bastler', 'Ersatzteil' etc. aus. "
+                "Bei eBay wird zusaetzlich das strukturierte Zustandsfeld geprueft."
+            ),
+        )
+
         loc1, loc2 = st.columns(2)
         search_term["zip"] = loc1.text_input(
             "PLZ (optional, nur eBay & Kleinanzeigen)", value=_saved("zip", "")
@@ -471,7 +498,14 @@ def main():
     favorites = st.session_state.favorites
 
     exclude_words = parse_exclude(search_term.get("exclude"))
+    required_words = parse_exclude(search_term.get("required"))
     items = filter_by_keywords(st.session_state.result_items, exclude_words)
+    items = filter_by_required(
+        items,
+        required_words,
+        title_only=search_term.get("required_title_only", False),
+    )
+    items = filter_out_defective(items, search_term.get("hide_defect", False))
     items = filter_by_price(items, search_term)
     items = sort_items(items, sort_option)
 
