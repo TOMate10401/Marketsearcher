@@ -326,7 +326,7 @@ def main():
         _render_favorites_page()
         return
     if view == "wishlist":
-        _render_wishlist_page(conn)
+        render_wishlist_page(conn)
         return
     if view == "wish_detail":
         render_wish_detail(conn, st.session_state.get("wish_id"))
