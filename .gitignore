@@ -3,3 +3,6 @@ __pycache__/
 .venv/
 .env
 favorites.json
+marketsearcher.db*
+data/exports/
+daily_run.log

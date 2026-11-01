@@ -101,3 +101,21 @@ HEADERS = {
     ),
     "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
 }
+
+SORT_OPTIONS = (
+    "Keine Sortierung",
+    "Preis aufsteigend",
+    "Preis absteigend",
+    "Titel",
+)
+
+RADIUS_OPTIONS = (5, 10, 20, 50, 100, 200)
+
+MAX_WISHES = 10
+MAX_MARKED_PER_WISH = 20
+MAX_PAGES_PER_RUN = 3
+
+STATUS_NEW = "unbewertet"
+STATUS_PLAIN = "plain"
+STATUS_MARKED = "markiert"
+STATUS_HIDDEN = "ausgeblendet"

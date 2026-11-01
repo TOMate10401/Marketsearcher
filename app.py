@@ -3,18 +3,17 @@ import json
 import os
 import re
 from datetime import datetime
-from io import BytesIO
 
-import requests
 import streamlit as st
 
-from constants import CATEGORIES, HEADERS
+import db
 from checker import (
     STATUS_GONE,
     check_favorites,
     extract_item_id,
     price_changed,
 )
+from constants import MAX_WISHES, SORT_OPTIONS
 from favorites import (
     add_favorite,
     apply_check_result,
@@ -34,34 +33,9 @@ from filtering import (
     sort_items,
 )
 from scrapers import get_ebay_token, run_sources
-
-
-SORT_OPTIONS = (
-    "Keine Sortierung",
-    "Preis aufsteigend",
-    "Preis absteigend",
-    "Titel",
-)
-
-RADIUS_OPTIONS = (5, 10, 20, 50, 100, 200)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _fetch_image_bytes(url):
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=20)
-        if resp.status_code == 200 and resp.content:
-            return resp.content
-    except requests.RequestException:
-        pass
-    return None
-
-
-def _load_image_bytes(url):
-    if not url:
-        return None
-    data = _fetch_image_bytes(url)
-    return BytesIO(data) if data else None
+from search_form import build_search_form
+from ui_common import fav_button_key, load_image_bytes, render_title_link
+from wishlist_ui import DEFAULT_QUERY, render_wish_detail, render_wishlist_page
 
 
 def _search_signature(search_term, use_vinted, use_ebay, use_kleinanzeigen):
@@ -72,10 +46,6 @@ def _search_signature(search_term, use_vinted, use_ebay, use_kleinanzeigen):
     }
     sig["sources"] = [use_vinted, use_ebay, use_kleinanzeigen]
     return json.dumps(sig, sort_keys=True, default=str)
-
-
-def _fav_button_key(key):
-    return hashlib.md5(key.encode("utf-8")).hexdigest()
 
 
 def _saved(key, default):
@@ -112,19 +82,11 @@ def _render_card(item, favorites):
     is_favorite = key in favorites
 
     with st.container(border=True):
-        img_data = _load_image_bytes(item.get("image_url"))
+        img_data = load_image_bytes(item.get("image_url"))
         if img_data:
             st.image(img_data)
 
-        title = (item.get("title") or "").strip() or "(ohne Titel)"
-        safe_title = title.replace("[", "(").replace("]", ")")
-        link = item.get("link") or ""
-
-        title_str = f"{'⭐ ' if is_favorite else ''}{safe_title}"
-        if link:
-            st.markdown(f"**[{title_str}]({link})**")
-        else:
-            st.markdown(f"**{title_str}**")
+        render_title_link(item.get("title"), item.get("link"), star=is_favorite)
 
         if item.get("distance"):
             st.caption(item["distance"])
@@ -136,7 +98,7 @@ def _render_card(item, favorites):
 
         if st.button(
             "★" if is_favorite else "☆",
-            key=f"fav-{_fav_button_key(key)}",
+            key=f"fav-{fav_button_key(key)}",
             use_container_width=True,
         ):
             if is_favorite:
@@ -152,7 +114,7 @@ def _render_card(item, favorites):
 
 
 def _render_favorite_card(entry, favorites):
-    """Karte für die Favoriten-Seite mit Verfügbarkeits-/Preis-Badge."""
+    """Karte fuer die Favoriten-Seite mit Verfuegbarkeits-/Preis-Badge."""
     key = item_key(entry)
     is_favorite = key in favorites
     gone = entry.get("check_status") == STATUS_GONE
@@ -160,19 +122,13 @@ def _render_favorite_card(entry, favorites):
     with st.container(border=True):
         if gone:
             st.caption("Nicht mehr verfügbar")
-        img_data = None if gone else _load_image_bytes(entry.get("image_url"))
+        img_data = None if gone else load_image_bytes(entry.get("image_url"))
         if img_data:
             st.image(img_data)
 
-        title = (entry.get("title") or "").strip() or "(ohne Titel)"
-        safe_title = title.replace("[", "(").replace("]", ")")
-        link = entry.get("link") or ""
-
-        title_str = f"{'⭐ ' if is_favorite else ''}{safe_title}"
-        if link and not gone:
-            st.markdown(f"**[{title_str}]({link})**")
-        else:
-            st.markdown(f"**{title_str}**")
+        render_title_link(
+            entry.get("title"), entry.get("link") if not gone else "", star=is_favorite
+        )
 
         if entry.get("distance"):
             st.caption(entry["distance"])
@@ -194,7 +150,7 @@ def _render_favorite_card(entry, favorites):
 
         if st.button(
             "★" if is_favorite else "☆",
-            key=f"fav-{_fav_button_key(key)}",
+            key=f"fav-{fav_button_key(key)}",
             use_container_width=True,
         ):
             if is_favorite:
@@ -220,7 +176,7 @@ def _render_grid(items, favorites, columns=3):
 
 
 def _run_favorites_check():
-    """Prüft alle Favoriten parallel, wenn der Cache abgelaufen ist."""
+    """Prueft alle Favoriten parallel, wenn der Cache abgelaufen ist."""
     favorites = st.session_state.favorites
     if not favorites:
         return
@@ -304,149 +260,90 @@ def _render_favorites_page():
             _render_favorite_card(entry, st.session_state.favorites)
 
 
-def _build_search_term():
-    saved_category = _saved("category", "Alle Kategorien")
-    if saved_category not in CATEGORIES:
-        saved_category = "Alle Kategorien"
+def _render_nav(fav_count):
+    c1, c2, c3 = st.columns([4, 1, 1])
+    with c2:
+        if st.button(f"⭐ Favoriten ({fav_count})", use_container_width=True):
+            st.session_state.view = "favorites"
+            st.rerun()
+    with c3:
+        if st.button("🎯 Wunschliste", use_container_width=True):
+            st.session_state.view = "wishlist"
+            st.rerun()
 
-    saved_gender = _saved("gender", "")
-    gender_options = ("", "male", "female")
-    gender_index = (
-        gender_options.index(saved_gender) if saved_gender in gender_options else 0
+
+def _save_current_search_as_wish(search_term, use_vinted, use_ebay, use_kleinanzeigen, sort_option):
+    conn = st.session_state.db_conn
+    if db.wish_count(conn) >= MAX_WISHES:
+        st.error(f"Maximal {MAX_WISHES} Wünsche erlaubt.")
+        return
+    term = search_term["term"].strip()
+    name = term or "Wunsch"
+    query = {**DEFAULT_QUERY}
+    query.update(
+        {
+            "category": search_term["category"],
+            "term": search_term["term"],
+            "use_vinted": use_vinted,
+            "use_ebay": use_ebay,
+            "use_kleinanzeigen": use_kleinanzeigen,
+            "gender": search_term.get("gender", ""),
+            "size": search_term.get("size", []),
+            "condition": search_term.get("condition", []),
+            "min_price": search_term["min_price"],
+            "max_price": search_term["max_price"],
+            "exclude": search_term["exclude"],
+            "required": search_term["required"],
+            "required_title_only": search_term["required_title_only"],
+            "hide_defect": search_term["hide_defect"],
+            "zip": search_term["zip"],
+            "radius": search_term["radius"],
+            "sort": sort_option,
+        }
     )
-
-    saved_radius = _saved("radius", 50)
-    radius_index = (
-        RADIUS_OPTIONS.index(saved_radius)
-        if saved_radius in RADIUS_OPTIONS
-        else RADIUS_OPTIONS.index(50)
-    )
-
-    saved_sort = _saved("sort", "Keine Sortierung")
-    sort_index = (
-        SORT_OPTIONS.index(saved_sort) if saved_sort in SORT_OPTIONS else 0
-    )
-
-    search_term = {}
-    search_term["category"] = st.selectbox(
-        "Kategorie", CATEGORIES, index=CATEGORIES.index(saved_category)
-    )
-    search_term["term"] = st.text_input("Suchbegriff", value=_saved("term", ""))
-
-    with st.expander("Erweiterte Filter"):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            use_vinted = st.checkbox("Vinted", value=_saved("use_vinted", True))
-        with col2:
-            use_ebay = st.checkbox("eBay", value=_saved("use_ebay", True))
-        with col3:
-            use_kleinanzeigen = st.checkbox(
-                "Kleinanzeigen", value=_saved("use_kleinanzeigen", True)
-            )
-
-        is_fashion = search_term["category"] in ("Alle Kategorien", "Mode & Kleidung")
-
-        if is_fashion:
-            search_term["gender"] = st.selectbox(
-                "Gender", gender_options, index=gender_index
-            )
-            search_term["size"] = st.multiselect(
-                "Größe", ("XS", "S", "M", "L", "XL", "XXL"),
-                default=_saved("size", []),
-            )
-            search_term["condition"] = st.multiselect(
-                "Zustand", ("neu", "wie neu", "sehr gut", "gut", "gebraucht"),
-                default=_saved("condition", []),
-            )
-        else:
-            search_term["gender"] = ""
-            search_term["size"] = []
-            search_term["condition"] = []
-
-        sc1, sc2 = st.columns(2)
-        search_term["min_price"] = sc1.text_input(
-            "Mindestpreis (EUR)", value=_saved("min_price", "")
-        )
-        search_term["max_price"] = sc2.text_input(
-            "Maximalpreis (EUR)", value=_saved("max_price", "")
-        )
-
-        search_term["exclude"] = st.text_input(
-            "Ausschließen (kommagetrennt, z.B. defekt, Ersatzteile)",
-            value=_saved("exclude", ""),
-        )
-
-        search_term["required"] = st.text_input(
-            "Muss enthalten (kommagetrennt, z.B. 3080, windforce)",
-            value=_saved("required", ""),
-        )
-        search_term["required_title_only"] = st.checkbox(
-            "Muss enthalten: nur im Titel suchen",
-            value=_saved("required_title_only", False),
-        )
-
-        search_term["hide_defect"] = st.checkbox(
-            "Defekte Artikel ausblenden",
-            value=_saved("hide_defect", False),
-            help=(
-                "Blendet Artikel mit 'defekt', 'Bastler', 'Ersatzteil' etc. aus. "
-                "Bei eBay wird zusaetzlich das strukturierte Zustandsfeld geprueft."
-            ),
-        )
-
-        loc1, loc2 = st.columns(2)
-        search_term["zip"] = loc1.text_input(
-            "PLZ (optional, nur eBay & Kleinanzeigen)", value=_saved("zip", "")
-        )
-        search_term["radius"] = loc2.selectbox(
-            "Umkreis (km)", RADIUS_OPTIONS, index=radius_index
-        )
-
-        if search_term["zip"].strip() and use_vinted:
-            st.caption(
-                "ℹ️ Der Standortfilter wirkt nicht bei Vinted "
-                "(Versand-Marktplatz ohne Standortsuche)."
-            )
-
-    return search_term, use_vinted, use_ebay, use_kleinanzeigen, sort_index
+    wish_id = db.create_wish(conn, name, query)
+    st.session_state.view = "wish_detail"
+    st.session_state.wish_id = wish_id
+    st.rerun()
 
 
 def main():
     st.title("Marketsearcher")
 
     os.environ["EBAY_ENV"] = "production"
-    st.caption("🔷 Verwende eBay Production (echte Daten)")
+    st.caption("🔧 Verwende eBay Production (echte Daten)")
+
+    if "db_conn" not in st.session_state:
+        db.init_db()
+        st.session_state.db_conn = db.get_conn()
+    conn = st.session_state.db_conn
 
     if "favorites" not in st.session_state:
         st.session_state.favorites = load_favorites()
 
-    if st.session_state.get("view") == "favorites":
+    view = st.session_state.get("view", "search")
+    if view == "favorites":
         _render_favorites_page()
         return
+    if view == "wishlist":
+        _render_wishlist_page(conn)
+        return
+    if view == "wish_detail":
+        render_wish_detail(conn, st.session_state.get("wish_id"))
+        return
 
-    fav_col = st.columns([4, 1])[1]
-    with fav_col:
-        fav_clicked = st.button(
-            f"⭐ Favoriten ({len(st.session_state.favorites)})",
-            use_container_width=True,
-        )
+    _render_nav(len(st.session_state.favorites))
 
     (
         search_term,
         use_vinted,
         use_ebay,
         use_kleinanzeigen,
-        sort_index,
-    ) = _build_search_term()
+    ) = build_search_form(defaults=st.session_state.get("saved_search", {}))
 
+    saved_sort = _saved("sort", "Keine Sortierung")
+    sort_index = SORT_OPTIONS.index(saved_sort) if saved_sort in SORT_OPTIONS else 0
     sort_option = st.selectbox("Sortieren nach", SORT_OPTIONS, index=sort_index)
-
-    if fav_clicked:
-        _save_search_state(
-            search_term, use_vinted, use_ebay, use_kleinanzeigen, sort_option
-        )
-        st.session_state.view = "favorites"
-        st.rerun()
 
     if not search_term["term"].strip():
         st.info("Suchbegriff eingeben, um Ergebnisse zu sehen.")
@@ -511,12 +408,26 @@ def main():
 
     st.caption(f"{len(items)} Ergebnisse · Seite {st.session_state.result_page}")
 
-    st.download_button(
-        "⬇️ Ergebnisse als CSV",
-        data=items_to_csv(items),
-        file_name="marketsearcher_ergebnisse.csv",
-        mime="text/csv",
-    )
+    dl_col, wish_col = st.columns(2)
+    with dl_col:
+        st.download_button(
+            "⬇️ Ergebnisse als CSV",
+            data=items_to_csv(items),
+            file_name="marketsearcher_ergebnisse.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with wish_col:
+        if st.button(
+            "🎯 Als Wunsch speichern", use_container_width=True,
+            help=f"Aktuelle Suche als Wunsch speichern (max. {MAX_WISHES})",
+        ):
+            _save_search_state(
+                search_term, use_vinted, use_ebay, use_kleinanzeigen, sort_option
+            )
+            _save_current_search_as_wish(
+                search_term, use_vinted, use_ebay, use_kleinanzeigen, sort_option
+            )
 
     _render_grid(items, favorites)
 
