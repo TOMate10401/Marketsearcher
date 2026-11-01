@@ -68,6 +68,48 @@ def filter_by_keywords(items, exclude_words):
     ]
 
 
+def _item_text(item, title_only=False):
+    """Suchtext eines Items: nur Titel oder Titel + Zustand/Untertitel."""
+    parts = [item.get("title") or ""]
+    if not title_only:
+        parts.append(item.get("condition") or "")
+    return " ".join(p for p in parts if p).lower()
+
+
+def filter_by_required(items, required_words, title_only=False):
+    """Behaelt nur Items, die mindestens einen Muss-Begriff enthalten (ODER-Logik)."""
+    if not required_words:
+        return items
+    return [
+        item for item in items if any(w in _item_text(item, title_only) for w in required_words)
+    ]
+
+
+DEFECT_KEYWORDS = (
+    "defekt",
+    "bastler",
+    "ersatzteil",
+    "nicht funktionsf\u00e4hig",
+    "kaputt",
+    "gepr\u00fcft durch defekt",  # ebay "Geprueft - defekt"-Bedingung
+)
+
+
+def is_defective(item):
+    """Erkennt defekte Artikel per strukturiertem condition-Feld oder Stichworten."""
+    condition = (item.get("condition") or "").lower()
+    text = _item_text(item)
+    if "defekt" in condition:
+        return True
+    return any(k in text for k in DEFECT_KEYWORDS)
+
+
+def filter_out_defective(items, hide_defect):
+    if not hide_defect:
+        return items
+    return [item for item in items if not is_defective(item)]
+
+
 def sort_items(items, key):
     if not items:
         return items
