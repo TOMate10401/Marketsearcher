@@ -101,7 +101,7 @@ def _render_item_card(conn, wish, item, favorites):
                 try:
                     db.set_item_status(
                         conn, wish_id, item["source"], item["item_id"],
-                        "" if is_marked else STATUS_MARKED,
+                        STATUS_NEW if is_marked else STATUS_MARKED,
                     )
                 except ValueError as e:
                     st.error(str(e))
@@ -225,8 +225,7 @@ def render_wish_detail(conn, wish_id):
         statuses.append(STATUS_NEW)
     if show_hidden:
         statuses.append(STATUS_HIDDEN)
-    plain = db.get_items(conn, wish_id, statuses=["plain"]) if (show_new or show_marked) else []
-    items = db.get_items(conn, wish_id, statuses=statuses or None) + plain
+    items = db.get_items(conn, wish_id, statuses=statuses or None)
 
     if show_marked:
         gone_count = sum(
@@ -291,7 +290,7 @@ def render_wishlist_page(conn):
                        if w.get("last_run_at") else " · noch kein Lauf")
                 )
             with c2:
-                with st.popover("⚙️"):
+                with st.expander("⚙️"):
                     new_name = st.text_input("Name", value=w["name"], key=f"rename-{w['id']}")
                     if st.button("Umbenennen", key=f"do-rename-{w['id']}", use_container_width=True):
                         if new_name.strip():
