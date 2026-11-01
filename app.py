@@ -31,7 +31,7 @@ from filtering import (
     parse_exclude,
     sort_items,
 )
-from scrapers import get_ebay_token, run_sources
+from scrapers import check_sources, get_ebay_token, run_sources
 from search_form import build_search_form
 from ui_common import fav_button_key, load_image_bytes, render_title_link
 from wishlist_ui import DEFAULT_QUERY, render_wish_detail, render_wishlist_page
@@ -74,6 +74,23 @@ def _save_search_state(search_term, use_vinted, use_ebay, use_kleinanzeigen, sor
 
 
 CHECK_CACHE_TTL = 600
+
+HEALTH_CACHE_TTL = 600
+
+
+@st.cache_data(ttl=HEALTH_CACHE_TTL, show_spinner=False)
+def _source_health(ebay_token):
+    return check_sources(ebay_token=ebay_token)
+
+
+def _render_source_health():
+    token = st.session_state.get("ebay_token")
+    health = _source_health(token or "")
+    parts = []
+    for source, ok in health.items():
+        icon = "🟢" if ok else "🔴"
+        parts.append(f"{icon} {source}")
+    st.caption("Quellen-Status: " + " · ".join(parts) + f" (aktualisiert alle {HEALTH_CACHE_TTL // 60} Min.)")
 
 
 def _render_card(item, favorites):
@@ -332,6 +349,7 @@ def main():
         return
 
     _render_nav(len(st.session_state.favorites))
+    _render_source_health()
 
     (
         search_term,
