@@ -22,6 +22,8 @@ from filtering import (
     parse_exclude,
     sort_items,
 )
+from daily_run import run_wish
+from scrapers import get_ebay_token
 from search_form import build_search_form
 from ui_common import fav_button_key, load_image_bytes, render_title_link
 
@@ -161,6 +163,23 @@ def render_wish_detail(conn, wish_id):
 
     if wish.get("last_run_at"):
         st.caption(f"Letzter Lauf: {wish['last_run_at']} — {wish.get('last_run_status') or ''}")
+
+    run_col, hint_col = st.columns([2, 3])
+    with run_col:
+        manual_run = st.button("🔎 Jetzt suchen", key="wish-manual-run")
+    with hint_col:
+        st.caption(
+            "ℹ️ Eigentlich nicht nötig: Diese Suche läuft automatisch einmal "
+            "täglich (cron auf dem Pi). Manuell nur zum Testen gedacht."
+        )
+    if manual_run:
+        token = st.session_state.get("ebay_token")
+        if wish["query"].get("use_ebay", True) and not token:
+            token = get_ebay_token()
+            st.session_state.ebay_token = token
+        with st.spinner("Suche läuft (Seite 1–3 + Verfügbarkeitscheck der markierten) ..."):
+            run_wish(conn, wish, token)
+        st.rerun()
 
     with st.expander("🔍 Suchanfrage bearbeiten", expanded=False):
         query_defaults = {**DEFAULT_QUERY, **wish["query"]}
