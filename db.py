@@ -48,7 +48,7 @@ CREATE INDEX IF NOT EXISTS idx_items_wish ON items(wish_id, status);
 
 
 def get_conn(path=DB_PATH):
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
